@@ -4,6 +4,12 @@ Cross-machine wake channel for Claude Code sessions. When a teammate posts,
 your live session is woken mid-task — no prompt from you, even on a different
 network.
 
+> **New here?** [CONTEXT.md](./CONTEXT.md) defines the vocabulary (Room, Event,
+> Notice, Document, Bus name). [docs/adr/](./docs/adr/) records the four
+> decisions most likely to make you ask "why on earth is it like that" — no
+> auth, metadata-only notices, documents stored outside the room, and a monitor
+> with no dependencies.
+
 A background monitor holds one push connection to the bus and tells your
 session **who** posted. It never carries the message text: that is fetched
 deliberately, and framed as untrusted, by the `bus-inbox` skill.
@@ -81,24 +87,52 @@ teammate posts  ──▶  POST /api/v1/bus/events        (body stored in Redis)
 The Stop hook does **no network polling**. It watches a local file once a
 second; the monitor owns the single push connection.
 
-### Rooms
+### Rooms — how you avoid waking the whole team
 
-Each repo gets a room derived from its **git remote** (`truxo-inc/truxo-punjabsoft`),
-not the folder name — the same repo is checked out under different directory
-names on different machines. Add named channels with `BUS_EXTRA_ROOMS`.
+You are always listening on two rooms: **your repo's** (derived from its git
+remote, not the folder name — the same repo sits in differently-named
+directories on different machines) and **`dm/<your-name>`**.
 
-Rooms are noise reduction, not access control: any authenticated dev can listen
-to any room they know the name of.
+The repo room reaches everyone working on that repo, which is right for
+"restarting dev in 5" and wrong for most other things. Narrow it:
 
-You are never woken by your own messages. The server derives your identity from
-your token and excludes you before sending.
+```bash
+hooks/bus-send.sh --to ravi "can you look at the settlement bug?"   # one person
+hooks/bus-send.sh --room truxo-3618-hotfix "patch reverted"         # a workstream
+hooks/bus-send.sh "restarting dev in 5"                             # everyone here
+```
+
+Workstream rooms need no setup — a room exists as soon as someone posts to it —
+but only people who joined will hear you:
+
+```bash
+hooks/bus-rooms.sh                    # what am I listening on?
+hooks/bus-rooms.sh join truxo-3618-hotfix
+hooks/bus-rooms.sh leave truxo-3618-hotfix
+```
+
+So a hotfix crew and a feature crew can talk without waking each other, while
+both stay reachable in the repo room for things that really are everyone's
+business.
+
+Rooms are noise routing, **not access control**. The bus is unauthenticated, so
+anyone who knows a room's name can join and read it — `dm/` means "addressed to
+you", never "only you can see it".
+
+You are never woken by your own messages: the server excludes the author before
+sending.
 
 ## Commands
 
 ```bash
-# post to this repo's room
+# post
 hooks/bus-send.sh "restarting dev in 5"
 hooks/bus-send.sh --type deploy -t TRUXO-123 "shipped the auth refactor"
+hooks/bus-send.sh --to ravi "just you: can you review the bus PR?"
+hooks/bus-send.sh --room truxo-3618-hotfix "patch reverted"
+
+# rooms
+hooks/bus-rooms.sh [join|leave] <room>
 
 # read the bodies of what's waiting
 /bus-inbox

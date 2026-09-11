@@ -21,12 +21,13 @@ CONFIG_DIR="${TRUXO_BUS_CONFIG_DIR:-$HOME/.config/truxo-bus}"
 : "${BUS_URL:?set BUS_URL in $CONFIG_DIR/config.env}"
 : "${DEV_NAME:?set DEV_NAME in $CONFIG_DIR/config.env}"
 
-TICKET=""; TYPE="announce"; ROOM=""; FILE=""
+TICKET=""; TYPE="announce"; ROOM=""; FILE=""; TO=""
 while [ $# -gt 0 ]; do
   case "$1" in
     -t|--ticket) TICKET="${2:?--ticket needs a value}"; shift 2 ;;
     --type)      TYPE="${2:?--type needs a value}"; shift 2 ;;
     --room)      ROOM="${2:?--room needs a value}"; shift 2 ;;
+    --to)        TO="${2:?--to needs a name}"; shift 2 ;;
     --file)      FILE="${2:?--file needs a path}"; shift 2 ;;
     -h|--help)   awk 'NR>1 && /^#/ {print substr($0,3); next} NR>1 {exit}' "$0"; exit 0 ;;
     -*)          echo "unknown option: $1" >&2; exit 1 ;;
@@ -34,12 +35,18 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-MESSAGE="${1:?usage: bus-send.sh [--room R] [--type T] [-t TICKET] \"<message>\"}"
+MESSAGE="${1:?usage: bus-send.sh [--to NAME | --room R] [--type T] [-t TICKET] [--file F] \"<message>\"}"
 
-# Default to this repo's room, derived from the git remote (not the folder).
-if [ -z "$ROOM" ]; then
+[ -n "$TO" ] && [ -n "$ROOM" ] && { echo "use --to or --room, not both" >&2; exit 1; }
+
+if [ -n "$TO" ]; then
+  # One person's inbox instead of the whole repo. Their monitor always listens
+  # on dm/<their-name>.
+  ROOM="dm/$TO"
+elif [ -z "$ROOM" ]; then
+  # Default to this repo's room, derived from the git remote (not the folder).
   remote="$(git remote get-url origin 2>/dev/null || true)"
-  [ -n "$remote" ] || { echo "no git remote and no --room given" >&2; exit 1; }
+  [ -n "$remote" ] || { echo "no git remote and no --room/--to given" >&2; exit 1; }
   ROOM="$(printf '%s' "$remote" \
     | sed -E 's#^git@([^:]+):#https://\1/#' \
     | sed -E 's#^[a-z+]+://[^/]+/##' \

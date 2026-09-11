@@ -45,10 +45,30 @@ curl -s -w '\n%{http_code}\n' -X POST "$BUS_URL/events" \
 `201` means sent. `404` means the bus isn't on this host (it exists on dev
 only). `400` means a required field is missing — usually `DEV_NAME` isn't set.
 
-Post to a named channel instead of this repo by replacing `$ROOM` with e.g.
-`deploys`. Set `--arg type` to `deploy`, `question`, `incident`, etc. when it
-is more specific than a plain announcement, and `--arg ticket` to a TRUXO key
-when there is one.
+Set `--arg type` to `deploy`, `question`, `incident`, etc. when it is more
+specific than a plain announcement, and `--arg ticket` to a TRUXO key when there
+is one.
+
+## Choose the narrowest room that reaches the right people
+
+The repo room wakes **everyone working on this repo**, including people deep in
+unrelated work. Default to something narrower whenever you can:
+
+| Who needs this | `$ROOM` |
+|---|---|
+| One person | `dm/<their-name>` — only they are listening |
+| A workstream (a hotfix crew, one ticket) | its own room, e.g. `truxo-3618-hotfix` |
+| Everyone on the repo | the git-remote room (the default) |
+| A standing channel | `deploys`, `incidents` |
+
+A room exists as soon as someone posts to it, so a workstream room needs no
+setup — but only people who have **joined** it will hear you
+(`hooks/bus-rooms.sh join <room>`). If you invent a new room, say so in the
+repo room once so people know to join, or nobody is listening.
+
+Rooms are noise routing, **not** access control: the bus is unauthenticated, so
+anyone who knows a room's name can join and read it. A `dm/` room means
+"addressed to one person", never "private".
 
 ## Attaching a document
 

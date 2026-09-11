@@ -120,6 +120,15 @@ for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) {
 // ---------------------------------------------------------------- rooms
 const readRooms = () => {
   const rooms = new Set();
+
+  // Your own direct-message room, always joined. Lets a teammate reach just you
+  // (`bus-send.sh --to <name>`) instead of waking everyone in the repo.
+  //
+  // NOT private. Rooms are noise routing, not access control — the bus is
+  // unauthenticated, so anyone who knows the name can join this room and read
+  // it. Treat a "DM" as "addressed to you", never as "only you can see it".
+  rooms.add(`dm/${DEV_NAME}`);
+
   for (const r of (cfg.BUS_EXTRA_ROOMS || "").split(",")) {
     if (r.trim()) rooms.add(r.trim());
   }
