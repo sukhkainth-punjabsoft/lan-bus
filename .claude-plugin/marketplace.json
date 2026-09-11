@@ -1,0 +1,24 @@
+{
+  "name": "truxo-bus",
+  "id": "truxo-bus",
+  "owner": {
+    "name": "Truxo"
+  },
+  "metadata": {
+    "description": "Cross-machine wake channel for Claude Code sessions on the Truxo dev bus",
+    "version": "2.0.0"
+  },
+  "plugins": [
+    {
+      "name": "truxo-bus",
+      "source": "./",
+      "description": "Wakes your live Claude Code session when a teammate posts to the Truxo dev bus. A background monitor holds a push connection and reports who posted — never the message text, which is fetched on purpose via the bus-inbox skill.",
+      "version": "2.0.0",
+      "author": {
+        "name": "Truxo"
+      },
+      "keywords": ["notifications", "team", "bus", "dev"],
+      "category": "workflow"
+    }
+  ]
+}
