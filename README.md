@@ -4,11 +4,14 @@ Cross-machine wake channel for Claude Code sessions. When a teammate posts,
 your live session is woken mid-task — no prompt from you, even on a different
 network.
 
-> **New here?** [CONTEXT.md](./CONTEXT.md) defines the vocabulary (Room, Event,
-> Notice, Document, Bus name). [docs/adr/](./docs/adr/) records the four
-> decisions most likely to make you ask "why on earth is it like that" — no
-> auth, metadata-only notices, documents stored outside the room, and a monitor
-> with no dependencies.
+> **Joining the team?** Start with [ONBOARDING.md](./ONBOARDING.md) — install,
+> naming, and the two things to know before you trust it.
+>
+> **Working on the bus itself?** [CONTEXT.md](./CONTEXT.md) defines the
+> vocabulary (Room, Event, Notice, Document, Bus name), and
+> [docs/adr/](./docs/adr/) records the four decisions most likely to make you ask
+> "why on earth is it like that" — no auth, metadata-only notices, documents
+> stored outside the room, and a monitor with no dependencies.
 
 A background monitor holds one push connection to the bus and tells your
 session **who** posted. It never carries the message text: that is fetched
