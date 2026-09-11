@@ -103,7 +103,13 @@ if [ -f "$CONFIG" ]; then
   source "$CONFIG"
   URL="$BUS_URL"
 else
-  DEV_NAME="${NAME:-$(whoami | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9._-' '-')}"
+  # whoami ends in a newline, which `tr -cs` counts as a complement character
+  # and folds into a "-" — so an unnamed setup produced "sukh-", not "sukh", and
+  # DMs to the clean name went to a room nobody listened on. Strip it first, then
+  # trim stray separators so this matches the slug() in hooks/bus-rooms.sh.
+  DEV_NAME="${NAME:-$(whoami)}"
+  DEV_NAME="$(printf '%s' "$DEV_NAME" | tr '[:upper:]' '[:lower:]' \
+    | tr -cs 'a-z0-9._-' '-' | sed -E 's/^[-._]+//; s/[-._]+$//')"
   cat > "$CONFIG" <<EOF
 # Truxo dev bus. Written by setup.sh on $(date -u +%Y-%m-%dT%H:%M:%SZ).
 BUS_URL=$URL
