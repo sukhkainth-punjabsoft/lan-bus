@@ -2,5 +2,9 @@
   "name": "truxo-bus",
   "version": "2.0.0",
   "description": "Cross-machine wake channel for Claude Code sessions. A background monitor holds a push connection to the Truxo dev bus and wakes your live session when a teammate posts — carrying only who sent it, never the message text.",
-  "author": "Truxo"
+  "author": {
+    "name": "Truxo"
+  },
+  "keywords": ["notifications", "team", "bus", "dev"],
+  "skills": ["./skills/bus-setup", "./skills/bus-send", "./skills/bus-inbox"]
 }
