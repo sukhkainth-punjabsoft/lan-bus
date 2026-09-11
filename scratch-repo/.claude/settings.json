@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/bus-poll-rewake.sh",
+            "async": true,
+            "asyncRewake": true,
+            "timeout": 1860
+          }
+        ]
+      }
+    ]
+  }
+}

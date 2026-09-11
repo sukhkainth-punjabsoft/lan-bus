@@ -1,0 +1,15 @@
+# Shared secret — never commit. Each host mints its own via start-bus.sh.
+server/.bus-token
+
+# Local event log: machine-specific, and full of whatever people posted.
+server/events.jsonl
+
+# Per-machine bus config and read position.
+**/dev.env
+**/dev.env.mac-b
+**/.bus-cursor-*
+
+# Personal Claude Code config.
+.claude/settings.local.json
+
+.DS_Store
