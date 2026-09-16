@@ -310,63 +310,54 @@ bus_resolve_binding() { # <config dir> <session id> <repo room> <dev name> <BUS_
 
 # ------------------------------------------------------------------- cursors
 
-# Read forward from this Session's Cursor and advance it past whatever it finds,
-# both inside one lock. Prints the unread Notices as JSONL (nothing at all when
-# there are none) and always leaves cursors.json holding an entry for this
-# Session with a fresh `seen` for the GC.
+# The cursors document, normalised, as jq source. Shared by the read and the
+# commit below so that both agree on what is on disk: if one rebuilt a malformed
+# document and the other did not, the compare-and-set in bus_commit_cursor could
+# never match and the Session would quietly stop reporting anything.
 #
-#   bus_claim_unread <cursors file> <session id> <spool file> <bound rooms JSON>
+# The shape check is also the migration. The only other shape cursors.json has
+# ever had is Room-keyed ({"<room>": "<id>"}), which carries no Session in it and
+# so cannot be converted to one — it is discarded, and every Session then starts
+# at the tail of the Spool, which is exactly where a Session with no Cursor
+# starts anyway.
+_bus_cursor_state_filter() {
+  printf '%s' '
+    (if type == "object" then . else {} end)
+    | (if (to_entries | all(.value | (type == "object") and has("rooms")))
+       then . else {} end)
+  '
+}
+
+# The unread-and-next-Cursor calculation, emitted as jq source so that the two
+# entry points below share one copy. They MUST agree exactly: a peek that
+# computed `next` differently from the commit that writes it would advance the
+# Cursor past a Notice nobody ever reported, which is the silent loss this whole
+# project exists to prevent.
 #
-# The Spool is NEVER touched: no mv, no truncate, no delete. That is the whole of
-# ADR 0005 — every Session reads the same lines independently, so there is no
-# contest to win and nothing for a sibling Session to swallow, and the old
-# mv-then-truncate window in which an arriving Notice was destroyed cannot exist.
-#
-# Pass an empty bound array to register a Session without reading anything: an id
-# we have not seen before starts at the TAIL of the Spool, never at zero, or
-# every /clear, every --fork-session and every Claude Code Remote turn replays
-# the whole backlog as stale Wakes.
-#
-# The read and the advance are one locked step on purpose. Stop hooks are async,
-# so two of them can be alive for the same Session at once; doing this under a
-# lock is what stops both reporting the same Notices. It is the job the old
-# `mv "$SPOOL"` claim was doing, moved to the Cursor where it belongs — the
-# claim was machine-wide and so claimed every OTHER Session's Notices too.
-bus_claim_unread() {
-  local cursors="${1:?}" sid="${2:?}" spool="${3:?}" bound="${4:?}"
-  local lock="$cursors.lock" state now src out tmp rc=0
-
-  now="$(bus_now_iso)"
-  # jq refuses a file that is not there; an absent Spool is simply an empty one.
-  src="$spool"
-  [ -f "$spool" ] || src=/dev/null
-
-  bus_lock "$lock" || return 1
-
-  state="$(cat "$cursors" 2>/dev/null || true)"
-  [ -n "$state" ] || state='{}'
-  printf '%s' "$state" | jq -e 'type == "object"' >/dev/null 2>&1 || state='{}'
-
-  # -R -n: every Spool line is read as raw text and parsed on its own, so one
-  # torn or half-written line costs that line rather than the whole read.
-  #
-  # The shape check on $state is the migration. The only other shape cursors.json
-  # has ever had is Room-keyed ({"<room>": "<id>"}), which carries no Session in
-  # it and so cannot be converted to one — it is discarded, and every Session
-  # then starts at the tail, which is exactly where a Session with no Cursor
-  # starts anyway.
-  if out="$(jq -n -R -c \
-      --arg sid "$sid" --arg now "$now" \
-      --argjson bound "$bound" --argjson state "$state" '
+# Inputs: -R -n over the Spool, --arg sid/now, --argjson bound/state.
+# Output: {unread, have, next, state}.
+#   unread  the Notices this Session has not seen, in Spool order
+#   have    the Cursor as it was read, or null when this Session had none — the
+#           value a compare-and-set commit checks against
+#   next    the Cursor once those Notices are read, i.e. what to commit
+#   state   the whole cursors document with `next` already written in
+_bus_unread_program() {
+  local st
+  st="$(_bus_cursor_state_filter)"
+  # No single quotes anywhere in the body: it is carried as a single-quoted
+  # shell string, spliced around $st.
+  printf '%s' '
     [inputs | fromjson? // empty | select(type == "object")] as $spool
-    | (if ($state | type) == "object" then $state else {} end) as $raw
-    | (if ($raw | to_entries | all(.value | (type == "object") and has("rooms")))
-       then $raw else {} end) as $st
+    | ($state | '"$st"') as $st
+    | (if (($st[$sid].rooms?) | type) == "object" then $st[$sid].rooms else null end) as $have
     # Tail of the Spool: the last Notice id seen in each Room, right now.
     | (reduce $spool[] as $n ({};
          if (($n.room? // null) != null) and (($n.id? // null) != null)
          then .[$n.room] = $n.id else . end)) as $tail
-    | (if (($st[$sid].rooms?) | type) == "object" then $st[$sid].rooms else $tail end) as $cur
+    # A Session with no Cursor starts at the TAIL, never at zero, or every
+    # /clear, every --fork-session and every Claude Code Remote turn (a fresh
+    # session_id each time) replays the whole backlog as stale Wakes.
+    | ($have // $tail) as $cur
     | ($spool | to_entries) as $e
     # Where each Room-s Cursor sits in the Spool. A Cursor whose Notice has been
     # trimmed away leaves -1, so everything still present in that Room counts as
@@ -387,8 +378,132 @@ bus_claim_unread() {
        | $x.value] as $unread
     | (reduce $unread[] as $n ($cur;
          if ($n.id? // null) != null then .[$n.room] = $n.id else . end)) as $next
-    | {unread: $unread, state: ($st | .[$sid] = {rooms: $next, seen: $now})}
-  ' "$src" 2>/dev/null)"; then
+    | {unread: $unread, have: $have, next: $next,
+       state: ($st | .[$sid] = {rooms: $next, seen: $now})}
+  '
+}
+
+# Run that program over the Spool. Shared by the two entry points; not called
+# directly, and it takes no lock of its own — the locking caller holds one.
+#
+#   _bus_unread_compute <cursors file> <session id> <spool file> <bound rooms JSON>
+#
+# -R -n: every Spool line is read as raw text and parsed on its own, so one torn
+# or half-written line costs that line rather than the whole read.
+_bus_unread_compute() {
+  local cursors="${1:?}" sid="${2:?}" spool="${3:?}" bound="${4:?}"
+  local state src
+
+  # jq refuses a file that is not there; an absent Spool is simply an empty one.
+  src="$spool"
+  [ -f "$spool" ] || src=/dev/null
+
+  state="$(cat "$cursors" 2>/dev/null || true)"
+  [ -n "$state" ] || state='{}'
+  # --argjson rejects anything that is not JSON at all, which would fail the
+  # whole read rather than degrade to an empty document.
+  printf '%s' "$state" | jq -e . >/dev/null 2>&1 || state='{}'
+
+  jq -n -R -c --arg sid "$sid" --arg now "$(bus_now_iso)" \
+    --argjson bound "$bound" --argjson state "$state" \
+    "$(_bus_unread_program)" "$src" 2>/dev/null
+}
+
+# Read forward from this Session's Cursor WITHOUT moving it.
+#
+#   bus_peek_unread <cursors file> <session id> <spool file> <bound rooms JSON>
+#
+# Prints one JSON object: {unread, have, next, state}. A caller reports `unread`
+# and then commits `next` with bus_commit_cursor as the very last thing it does
+# — see the ordering note there.
+#
+# The Spool is NEVER touched: no mv, no truncate, no delete. That is the whole of
+# ADR 0005 — every Session reads the same lines independently, so there is no
+# contest to win and nothing for a sibling Session to swallow, and the old
+# mv-then-truncate window in which an arriving Notice was destroyed cannot exist.
+#
+# No lock is taken, because nothing is written. cursors.json is only ever
+# replaced by rename, so a reader sees one whole version or another, never half.
+bus_peek_unread() {
+  local out
+  out="$(_bus_unread_compute "$@")" || return 1
+  [ -n "$out" ] || return 1
+  printf '%s' "$out"
+}
+
+# Advance this Session's Cursor from `have` to `next`, but ONLY if it still
+# reads `have`.
+#
+#   bus_commit_cursor <cursors file> <session id> <have JSON> <next JSON>
+#
+# Returns 0 when the Cursor moved, which means the caller now owns those Notices
+# and MUST report them; non-zero when it did not — either another waiter for this
+# Session committed first (the compare-and-set failed) or the write did, and
+# either way the Notices are still unread and are somebody else's to announce.
+#
+# ORDERING. A caller must build its whole report BEFORE calling this, print it
+# immediately AFTER, and block signals across both. A Cursor advanced by a
+# process that is then killed before it reports says a Notice was read when
+# nobody ever saw it, and a Notice lost that way is the one failure this system
+# cannot detect or recover from. A duplicate Wake is merely annoying, so every
+# trade-off here leans that way.
+#
+# The compare-and-set is what stops a straggler — a waiter that outlived
+# retirement, for instance one belonging to another installed plugin version —
+# reporting the same Notices a second time. Splitting peek from commit gave up
+# the single-lock atomicity bus_claim_unread has; this buys it back.
+bus_commit_cursor() {
+  local cursors="${1:?}" sid="${2:?}" have="${3:?}" next="${4:?}"
+  local lock="$cursors.lock" state tmp rc=0 filter
+
+  filter="$(_bus_cursor_state_filter)"
+
+  bus_lock "$lock" || return 1
+
+  state="$(cat "$cursors" 2>/dev/null || true)"
+  [ -n "$state" ] || state='{}'
+
+  tmp="$(mktemp "$cursors.XXXXXX")" || { bus_unlock "$lock"; return 1; }
+  # Emits nothing at all when the Cursor on disk is not the one that was peeked,
+  # which the -s test below turns into a non-zero return.
+  if printf '%s' "$state" | jq -c --arg sid "$sid" --arg now "$(bus_now_iso)" \
+       --argjson have "$have" --argjson next "$next" '
+         ('"$filter"') as $st
+         | (if (($st[$sid].rooms?) | type) == "object" then $st[$sid].rooms else null end) as $on_disk
+         | if $on_disk == $have then ($st | .[$sid] = {rooms: $next, seen: $now}) else empty end
+       ' > "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+    mv "$tmp" "$cursors"
+  else
+    rm -f "$tmp"
+    rc=1
+  fi
+
+  bus_unlock "$lock"
+  return "$rc"
+}
+
+# Read forward from this Session's Cursor and advance it past whatever it finds,
+# both inside one lock. Prints the unread Notices as JSONL (nothing at all when
+# there are none) and always leaves cursors.json holding an entry for this
+# Session with a fresh `seen` for the GC.
+#
+#   bus_claim_unread <cursors file> <session id> <spool file> <bound rooms JSON>
+#
+# Pass an empty bound array to register a Session without reading anything, which
+# is what bus-wake.sh uses this for: it seeds an unknown Session at the tail of
+# the Spool and refreshes `seen`, and reads nothing at all.
+#
+# A caller that intends to REPORT wants bus_peek_unread + bus_commit_cursor
+# instead. Doing the read and the advance in one step marks the Notices read
+# before the caller has said a word about them, so anything that kills it in
+# between — including being retired by its own successor — loses them outright.
+bus_claim_unread() {
+  local cursors="${1:?}" sid="${2:?}" spool="${3:?}" bound="${4:?}"
+  local lock="$cursors.lock" out tmp rc=0
+
+  bus_lock "$lock" || return 1
+
+  if out="$(_bus_unread_compute "$cursors" "$sid" "$spool" "$bound")" && [ -n "$out" ]; then
     tmp="$(mktemp "$cursors.XXXXXX")" || rc=1
     if [ "$rc" = 0 ]; then
       if printf '%s' "$out" | jq -c '.state' > "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
@@ -408,4 +523,172 @@ bus_claim_unread() {
 
   bus_unlock "$lock"
   return "$rc"
+}
+
+# ------------------------------------------------------------------- waiters
+#
+# Every turn spawns a Wake hook that waits up to BUS_WAIT_MINUTES, and nothing
+# ever retired the previous one: ten were found alive on one machine at once, the
+# oldest 21 minutes old, spread across two plugin versions installed side by
+# side. Claiming the Spool with `mv` had been hiding what that cost — however
+# many waiters were alive, exactly one could ever fire. ADR 0005 removed the
+# claim, so the only thing now keeping N waiters for one Session from reporting
+# the same Notice N times is the Cursor step, and which of the N wins it is
+# arbitrary. That is a lock standing in for a lifecycle: the pile still grows by
+# one every turn, every one of them polls, and the winner is whoever happens to
+# look first. A waiter therefore records its pid against its Session and retires
+# its predecessor before it starts waiting.
+#
+# Only ever for the SAME Session. Another Session's waiter is none of our
+# business, and killing it is exactly the cross-talk ADR 0005 removed.
+
+# Where a Session's live waiter records itself. Session ids are scrubbed by
+# bus_session_id before they reach here, so they are safe as a path component.
+bus_waiter_file() {
+  printf '%s/waiters/%s.pid' "${1:?bus_waiter_file needs a config dir}" \
+                             "${2:?bus_waiter_file needs a session id}"
+}
+
+# A live process's start time, as one comparable string. Empty and non-zero when
+# the pid is gone.
+#
+# A pid on its own is NOT safe to signal. Pids are recycled, and by the time one
+# is read back it may belong to something else entirely; killing an unrelated
+# process because a pid was reused would be far worse than leaving a stray
+# waiter alive. Worse still, the recycler could be ANOTHER Session's waiter,
+# which really is a bus-wake.sh and so passes any check made on the command
+# alone. Start time settles both: the pid must still be the same process that
+# wrote the file.
+_bus_pid_identity() {
+  local pid="${1:-}" line
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  # ps fails and prints nothing for a pid that is gone.
+  line="$(ps -o lstart= -p "$pid" 2>/dev/null)" || return 1
+  [ -n "$line" ] || return 1
+  # BSD ps pads lstart, so squeeze the spaces — a recorded value has to compare
+  # equal to one read back later.
+  printf '%s' "$line" | tr -s ' ' | sed 's/^ *//; s/ *$//'
+}
+
+# True when <pid> is a live process really running <script basename>, rather
+# than one that merely mentions it. A shell one-liner, a grep, an editor with
+# the file open — all of them carry the name on their command line, and
+# signalling one of those is the failure this guard exists for.
+#
+# The rule is "the command is the script, optionally behind an interpreter":
+# walk the command line and the FIRST token that is not an interpreter must be
+# the script itself. That accepts `bus-wake.sh`, `bash /path/bus-wake.sh` and
+# the `/usr/bin/env bash /path/bus-wake.sh` a `#!/usr/bin/env bash` shebang
+# produces, and rejects `zsh -c "...bus-wake.sh..."` — which would otherwise
+# slip through on the interpreter name alone.
+bus_pid_runs_script() {
+  local pid="${1:-}" script="${2:?bus_pid_runs_script needs a script name}" cmd tok
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$pid" != "$$" ] || return 1
+
+  cmd="$(ps -o command= -p "$pid" 2>/dev/null)" || return 1
+  [ -n "$cmd" ] || return 1
+
+  while [ -n "$cmd" ]; do
+    tok="${cmd%% *}"
+    case "$cmd" in *" "*) cmd="${cmd#* }" ;; *) cmd="" ;; esac
+    [ -n "$tok" ] || continue
+    case "${tok##*/}" in
+      "$script") return 0 ;;
+      sh|bash|zsh|dash|ksh|env) ;;
+      # Anything else — another program, or a flag such as -c — means this is
+      # not an interpreter running the script, whatever else is on the line.
+      *) return 1 ;;
+    esac
+  done
+  return 1
+}
+
+# Retire this Session's previous waiter, if it still has one, and record
+# ourselves in its place.
+#
+#   bus_waiter_takeover <config dir> <session id> <script basename>
+#
+# Read, signal and write are one locked step. Two waiters starting at the same
+# moment would otherwise both read the same predecessor and both write
+# themselves, and the loser would stay alive with nothing naming it — a stray
+# nobody can ever retire, which is the bug this exists to remove.
+#
+# The predecessor is not waited for. It may be inside the window where it has
+# committed a Cursor and not yet reported, where it ignores TERM on purpose; it
+# finishes that and exits on its own, and its cleanup leaves our file alone
+# because the file no longer names it.
+bus_waiter_takeover() {
+  local cfg="${1:?}" sid="${2:?}" script="${3:?}"
+  local file lock dir old old_pid old_start tmp rc=0
+
+  file="$(bus_waiter_file "$cfg" "$sid")"
+  dir="$(dirname "$file")"
+  lock="$file.lock"
+  mkdir -p "$dir" 2>/dev/null || return 1
+
+  bus_lock "$lock" || return 1
+
+  old="$(cat "$file" 2>/dev/null || true)"
+  old_pid="${old%% *}"
+  old_start="${old#* }"
+  # No space in the record at all means no start time was written: refuse to
+  # signal on a bare pid rather than guess.
+  [ "$old_start" != "$old" ] || old_start=""
+  if [ -n "$old_pid" ] && [ -n "$old_start" ] \
+     && bus_pid_runs_script "$old_pid" "$script" \
+     && [ "$(_bus_pid_identity "$old_pid" || true)" = "$old_start" ]; then
+    kill -TERM "$old_pid" 2>/dev/null || true
+    bus_log "wake: retired waiter pid $old_pid for session $sid (superseded by pid $$)"
+  fi
+
+  tmp="$(mktemp "$file.XXXXXX")" || { bus_unlock "$lock"; return 1; }
+  if printf '%s %s\n' "$$" "$(_bus_pid_identity "$$" || true)" > "$tmp" 2>/dev/null; then
+    mv "$tmp" "$file"
+  else
+    rm -f "$tmp"
+    rc=1
+  fi
+
+  # Opportunistic sweep, inside the lock already held. A waiter lives at most
+  # BUS_WAIT_MINUTES, so anything a day old was left behind by a SIGKILL and
+  # names a process long gone. SessionEnd does not fire on SIGKILL either, so
+  # without this nothing would ever clear them.
+  find "$dir" -type f -name '*.pid' -mtime +1 -delete 2>/dev/null || true
+
+  bus_unlock "$lock"
+  return "$rc"
+}
+
+# Give up this Session's waiter slot on the way out.
+#
+#   bus_waiter_release <config dir> <session id>
+#
+# Removes the file ONLY while it still names us. By the time a retired waiter
+# runs its cleanup its successor has already written itself in, and deleting
+# that would leave the successor unretirable: the next waiter would find no
+# file, retire nobody, and the two would pile up exactly as before.
+#
+# Locked for the same reason the takeover is — a release that read the file just
+# before a successor rewrote it would otherwise delete the successor.
+bus_waiter_release() {
+  local cfg="${1:?}" sid="${2:?}"
+  local file lock current
+
+  file="$(bus_waiter_file "$cfg" "$sid")"
+  lock="$file.lock"
+  [ -f "$file" ] || return 0
+
+  # A lock we cannot take is not worth failing an exit path over. The file we
+  # would have removed names a dead process, and every reader proves liveness
+  # before it signals anything.
+  bus_lock "$lock" || return 0
+  current="$(cat "$file" 2>/dev/null || true)"
+  # An `if`, not `[ ... ] && rm`. This is the last real work an exiting waiter
+  # does, and a bare AND-list would leave "the file is not ours" — the ordinary
+  # case for a waiter that has already been superseded — looking like a failure
+  # to whatever reads the status next.
+  if [ "${current%% *}" = "$$" ]; then rm -f "$file"; fi
+  bus_unlock "$lock"
+  return 0
 }

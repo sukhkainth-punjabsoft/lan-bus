@@ -35,8 +35,33 @@ CURSORS="$CONFIG_DIR/cursors.json"
 # per file: one stale entry must not cost every live Session its position.
 jq -e 'type == "object"' "$CURSORS" >/dev/null 2>&1 || echo '{}' > "$CURSORS"
 
-# Rooms this machine listens on.
-ROOMS="$(jq -r 'join(",")' "$CONFIG_DIR/rooms.json" 2>/dev/null || echo "")"
+# The Rooms this machine actually listens on, taken from joined.json — the set
+# the SERVER confirmed on `bus:joined` and the Monitor wrote down (ADR 0005).
+#
+# NOT rooms.json. The Monitor joins more than rooms.json holds: it adds
+# `dm/<Bus name>` and BUS_EXTRA_ROOMS in code, and neither is ever written
+# there. A query built from rooms.json alone therefore never asks for a Direct
+# room, so you get Woken about a DM and then shown nothing — every DM this
+# machine received was unreadable. Read what the server confirmed; do not
+# re-derive a set only the Monitor knows.
+ROOMS="$(jq -r '[.[] | strings | select(length > 0)] | join(",")' \
+           "$CONFIG_DIR/joined.json" 2>/dev/null || echo "")"
+
+# Fall back to rooms.json when joined.json is absent or empty: on a fresh
+# machine the Monitor has never connected, so nothing has confirmed anything
+# yet, and the skill still has to work before the first join. (It also covers
+# the ~10s a newly joined Room spends in rooms.json before the Monitor re-joins
+# and the server confirms it.)
+[ -n "$ROOMS" ] || ROOMS="$(jq -r '[.[] | strings | select(length > 0)] | join(",")' \
+                              "$CONFIG_DIR/rooms.json" 2>/dev/null || echo "")"
+
+if [ -z "$ROOMS" ]; then
+  # Neither file named a Room. Asking the server for nothing would come back as
+  # an empty read, which reads exactly like "no new Messages" and is not that.
+  echo "no Rooms to read: the Monitor has joined nothing and rooms.json is empty." >&2
+  echo "Check $CONFIG_DIR/monitor.log — is the Monitor running and connected?" >&2
+  exit 0
+fi
 
 # ?rooms=<slug>:<cursor>,... built from THIS Session's Cursors alone. A Room this
 # Session has never read starts at 0, i.e. everything the server still holds —
@@ -125,9 +150,11 @@ never retry with a Cursor of `0` to "see more" — that refetches every Event th
 server still holds, for every Room.
 
 If a Wake has just reported Notices and this comes back empty, say so rather
-than reporting "nothing new". It means something advanced this Session's Cursors
-past those Events — a second read, or the Wake path — and the text is still on
-the server. That is a bug worth naming, not a quiet zero.
+than reporting "nothing new". Either something advanced this Session's Cursors
+past those Events — a second read, or the Wake path — or the Room those Notices
+came from was never in the query, which is visible as a Room in the Wake that is
+missing from `jq -r '.[]' "$CONFIG_DIR/joined.json"`. Either way the text is
+still on the server. That is a bug worth naming, not a quiet zero.
 
 ## Attached Documents
 

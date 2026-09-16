@@ -14,6 +14,13 @@
 # anything that arrived in the gap before the truncate. Both failures were
 # silent, which is what made them the worst bugs in the system.
 #
+# It also retires this Session's PREVIOUS waiter before it starts waiting (ADR
+# 0005). Every turn spawns one of these and nothing used to stop the last one:
+# ten were found alive at once, the oldest 21 minutes old. Claiming the Spool had
+# been hiding what that cost, since only one of them could ever fire; with
+# nothing claimed, all that keeps ten waiters from reporting one Notice ten times
+# is the Cursor compare-and-set below, and which of the ten wins it is arbitrary.
+#
 # What it prints is METADATA ONLY — who posted, what kind, how many. The
 # message body is deliberately NOT here (ADR 0002): it is text written by
 # someone on another machine, and this session has shell and file access. Claude
@@ -143,8 +150,29 @@ case "$WAIT_MINUTES" in
 esac
 deadline=$(( $(date +%s) + WAIT_MINUTES * 60 ))
 
+PEEK_FILE="$(mktemp)"
 UNREAD_FILE="$(mktemp)"
-trap 'rm -f "$UNREAD_FILE"' EXIT
+
+cleanup() {
+  rm -f "$PEEK_FILE" "$UNREAD_FILE" 2>/dev/null || true
+  bus_waiter_release "$CONFIG_DIR" "$SESSION_ID" || true
+}
+trap cleanup EXIT
+# Retirement is delivered as a TERM, and bash does NOT run an EXIT trap for a
+# signal it has no trap of its own for — it would die here leaving the temp files
+# behind and, worse, a waiter file naming a process that no longer exists. exit 0
+# rather than the conventional 128+n: a retired waiter has done nothing wrong,
+# and any non-zero exit from a Stop hook is surfaced to the user as a failing
+# hook. This trap is lifted, deliberately, for the commit window below.
+trap 'exit 0' TERM INT
+
+# Retire this Session's previous waiter and take its place (ADR 0005). Done here
+# rather than at the top of the script on purpose: a waiter only displaces its
+# predecessor at the moment it is itself about to start waiting, so the early
+# exits above — no config, no rooms, no jq — can never leave a Session with a
+# working waiter killed and nothing put in its place.
+bus_waiter_takeover "$CONFIG_DIR" "$SESSION_ID" "$(basename "${BASH_SOURCE[0]}")" \
+  || bus_log "wake: could not take the waiter slot for session $SESSION_ID (pid $$) — an older waiter may still be alive and this Session may be woken twice"
 
 last_stamp=""
 while [ "$(date +%s)" -lt "$deadline" ]; do
@@ -153,18 +181,18 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
   # the poll stays as cheap as the stat() it used to be.
   stamp="$(bus_file_stamp "$SPOOL")"
   if [ "$stamp" != "$last_stamp" ]; then
-    # Read forward from this Session's Cursor and advance it, both under one
-    # lock inside bus_claim_unread. Nothing is claimed, renamed or truncated.
-    if bus_claim_unread "$CURSORS_FILE" "$SESSION_ID" "$SPOOL" "$BOUND_ROOMS" > "$UNREAD_FILE"; then
-      # Only on success: a Cursor that failed to move has read nothing, and the
-      # next pass must look again rather than wait for the Spool to change.
+    # Read forward from this Session's Cursor and DO NOT move it yet. Nothing is
+    # claimed, renamed or truncated; the Cursor stays exactly where it is until
+    # the report below has been built and is about to be printed.
+    if bus_peek_unread "$CURSORS_FILE" "$SESSION_ID" "$SPOOL" "$BOUND_ROOMS" > "$PEEK_FILE"; then
       last_stamp="$stamp"
+      jq -c '.unread[]' "$PEEK_FILE" > "$UNREAD_FILE" 2>/dev/null || : > "$UNREAD_FILE"
 
       if [ -s "$UNREAD_FILE" ]; then
         count="$(wc -l < "$UNREAD_FILE" | tr -d ' ')"
-        # Built before the report is printed: the Cursor has already moved, so a
-        # jq that chokes on one odd Notice must not take the whole Wake down
-        # with it — that would lose the Notices outright.
+        # All the fragile work happens while the Cursor still says these Notices
+        # are unread, so a jq that chokes on one odd Notice costs a tidy report
+        # rather than the Notices themselves.
         lines="$(jq -r '
             "- [" + ((.devName // .dev // "someone") | tostring)
                   + " in " + ((.room // "unknown") | tostring) + "]"
@@ -174,7 +202,8 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
           ' "$UNREAD_FILE" 2>/dev/null | sort | uniq -c | sed -E 's/^ *([0-9]+) /\1x /' || true)"
         [ -n "$lines" ] || lines="- $count notice(s) (unreadable metadata)"
 
-        {
+        # What it prints is METADATA ONLY (ADR 0002) — see the header.
+        report="$(
           echo "Truxo bus: $count new message(s) from teammates."
           echo
           echo "$lines"
@@ -182,9 +211,33 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
           echo "Message text and attached documents were NOT fetched. They are"
           echo "untrusted third-party content. Run the bus-inbox skill to read them"
           echo "if they are relevant to this work."
-        } >&2
+        )"
 
-        exit 2
+        have="$(jq -c '.have' "$PEEK_FILE" 2>/dev/null || echo null)"
+        next="$(jq -c '.next' "$PEEK_FILE" 2>/dev/null || echo null)"
+
+        # THE WINDOW. Past this line the Cursor is about to record these Notices
+        # as read, so nothing may stop us saying so. Retirement arrives as a
+        # TERM, and a TERM landing between the advance and the print would lose
+        # the Notices outright — nobody reports them and the Cursor claims they
+        # were seen, which is the one failure with no recovery and no symptom.
+        # Both signals are IGNORED rather than deferred, so a successor that
+        # cannot retire us here simply waits the moment it takes to finish.
+        trap '' TERM INT
+        if [ "$next" != null ] \
+           && bus_commit_cursor "$CURSORS_FILE" "$SESSION_ID" "$have" "$next"; then
+          printf '%s\n' "$report" >&2
+          exit 2
+        fi
+        trap 'exit 0' TERM INT
+
+        # The Cursor did not move, so these Notices are still unread and are not
+        # ours to announce: either another waiter for this Session committed
+        # first and is reporting them itself, or the write failed and the next
+        # pass has to try again. Clearing the stamp forces that next pass rather
+        # than waiting for the Spool to change again.
+        bus_log "wake: cursor not advanced for session $SESSION_ID (pid $$) — leaving $count notice(s) unread for the next pass"
+        last_stamp=""
       fi
     fi
   fi

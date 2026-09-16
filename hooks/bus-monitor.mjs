@@ -37,6 +37,9 @@ const CONFIG_DIR =
   process.env.TRUXO_BUS_CONFIG_DIR || path.join(os.homedir(), ".config", "truxo-bus");
 const SPOOL = path.join(CONFIG_DIR, "spool.jsonl");
 const ROOMS_FILE = path.join(CONFIG_DIR, "rooms.json");
+// The room set the SERVER confirmed, written down for every other component to
+// read. See writeJoined() below for why this file exists at all.
+const JOINED_FILE = path.join(CONFIG_DIR, "joined.json");
 const PAUSE_FILE = path.join(CONFIG_DIR, "pause");
 const LOCK_FILE = path.join(CONFIG_DIR, "monitor.pid");
 const LOG_FILE = path.join(CONFIG_DIR, "monitor.log");
@@ -127,6 +130,11 @@ for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) {
 }
 
 // ---------------------------------------------------------------- rooms
+//
+// This is what we ASK to join, and two of its three sources exist only in this
+// process. What we actually joined is whatever the server says on `bus:joined`,
+// and that answer — not this request — is what gets written to joined.json for
+// the rest of the machine to read.
 const readRooms = () => {
   const rooms = new Set();
 
@@ -489,13 +497,53 @@ const joinRooms = () => {
   scheduleAckCheck();
 };
 
+/**
+ * Write down the room set the SERVER confirmed, so nothing else has to re-derive
+ * it.
+ *
+ * readRooms() unions three sources and only one of them — rooms.json — is on
+ * disk: `dm/<DEV_NAME>` and BUS_EXTRA_ROOMS are added in this process and were
+ * never written anywhere. bus-inbox built its fetch from rooms.json alone, so
+ * every room joined in code was invisible to a fetch: you were woken about a
+ * Direct room and then shown nothing, and every DM this machine had ever
+ * received was unreadable (ADR 0005). The monitor is the one component that
+ * knows the whole set, and on `bus:joined` it holds the server's own answer
+ * rather than a guess — so that is the value that gets persisted.
+ *
+ * Written on EVERY `bus:joined`, never only the first. The monitor re-joins
+ * whenever rooms.json grows, so a file that recorded the first join alone would
+ * go stale the moment a session joined a workstream room — and stale here means
+ * a room you are woken for and cannot read, which is the exact bug this fixes.
+ *
+ * Atomic, because wake hooks and the bus-inbox skill read this file
+ * concurrently: a reader must see the old set or the new one, never half a line
+ * of JSON.
+ */
+const writeJoined = (rooms) => {
+  try {
+    // Sorted, so the file stops changing when the server returns the same set in
+    // a different order. A bare array of strings on purpose: it is the shape
+    // rooms.json already has, so every reader keeps the jq it already had.
+    writeJsonAtomic(JOINED_FILE, [...rooms].sort());
+  } catch (err) {
+    // Never fatal. A monitor that dies here stops the whole machine being woken,
+    // which is far worse than a fetch falling back to rooms.json.
+    log(`! failed to write ${path.basename(JOINED_FILE)}: ${err.message}`);
+  }
+};
+
 const onEvent = (name, data) => {
   if (name === "bus:joined") {
     clearTimeout(ackTimer);
     ackTimer = null;
     warnedNoAck = false; // a later outage may legitimately warn again
     identity = data?.dev ?? null;
-    joined = new Set(data?.rooms ?? []);
+    // Filtered: this list arrives off the network, and it becomes the room names
+    // other components send back to the server in a query string.
+    joined = new Set(
+      (Array.isArray(data?.rooms) ? data.rooms : []).filter((r) => typeof r === "string" && r),
+    );
+    writeJoined(joined);
     log(`listening as ${identity} on: ${[...joined].join(", ") || "(none)"}`);
     return;
   }
@@ -574,6 +622,10 @@ const connect = () => {
   ws.addEventListener("close", () => {
     clearInterval(pingTimer);
     identity = null;
+    // In-memory only: joined.json is deliberately left alone. It is what readers
+    // build a fetch from, and a monitor between reconnects has not stopped this
+    // machine listening — blanking the file would make every room unreadable for
+    // the length of a network blip. The next `bus:joined` overwrites it.
     joined = new Set();
     log(`disconnected — retrying in ${Math.round(retryDelay / 1000)}s`);
     setTimeout(connect, retryDelay);
