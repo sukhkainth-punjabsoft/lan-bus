@@ -75,6 +75,51 @@ listening.
 
 You are never woken by your own messages.
 
+### Two sessions, two tickets, one repo
+
+This is the case that bites. If you run two Claude sessions on two tickets in the
+same repo and do nothing, both fall back to the **repo room** — so each is woken
+by the other's traffic, and you can't tell which session a message was for.
+
+Bind each session to its own room:
+
+```
+/bus-join truxo-3663          # this session is on 3663; works mid-session
+BUS_ROOM=truxo-3663 claude    # or at launch, if you already know
+```
+
+Now a post to `truxo-3663` wakes only that session, and one to `truxo-4444` only
+the other. The binding is remembered against your **git branch**, so the next
+session you open on that branch rebinds on its own — you pay the join once per
+ticket, not once per session.
+
+Listening and being woken are different things: the monitor listens on every room
+this machine joined, and a binding decides which of those reach a given session.
+
+## Claude posts on your behalf — read this before you push
+
+From 2.2.0 your session announces its own work. **Your pushes become messages
+your teammates are woken by.** Nobody types them. Two triggers:
+
+- **A push you make** is announced as a fact, by a hook. Pushes to `main`/`dev`/
+  `stage` go to the repo room; anything else goes to the room this session is
+  bound to — so if you bound it to a ticket, only the people on that ticket hear
+  it.
+- **Claude decides** something is worth saying — a phase finished that others
+  were blocked on, or it found something the people on this task need to know.
+  The test it applies is *"does this change what someone else should do right
+  now?"*, not *"what did I just do"*. Routine progress stays silent.
+
+Two guardrails, because an agent that can wake your colleagues unprompted needs
+them: a session never announces in a turn that a bus wake started (otherwise two
+machines wake each other forever), and automatic posts are capped at six per
+session per hour. Anything you ask for by hand is never capped.
+
+To silence a machine in both directions: `touch ~/.config/truxo-bus/pause`.
+
+If this is more than you want, say so before you push — it's easier to change the
+defaults than to un-wake five people.
+
 ## Two things to know before you trust it
 
 **It is not private.** The bus has no authentication. It exists only on the dev

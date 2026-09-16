@@ -125,6 +125,35 @@ you", never "only you can see it".
 You are never woken by your own messages: the server excludes the author before
 sending.
 
+### Binding a session to a room
+
+Joining and being woken are different things. The monitor **joins** every room
+this machine listens to; a **binding** decides which of those reach a given
+session. That distinction is what lets two sessions on one machine work on two
+tickets without hearing each other.
+
+```bash
+/bus-join truxo-3663           # this session; works mid-session
+BUS_ROOM=truxo-3663 claude     # or at launch
+```
+
+Unbound sessions fall back to the repo room — so two sessions on two tickets in
+the *same* repo both land there and each is woken by the other's traffic. Room
+names are arbitrary, so nothing can be derived from a checkout; a binding is
+recorded, not inferred. It is remembered against the **git branch**, so later
+sessions on that branch rebind on their own.
+
+Every session stays bound to `dm/<your-name>` — a direct message is addressed to
+you, not to a ticket, so all your live sessions hear it.
+
+### Announcements
+
+A session posts its own work without being asked (ADR 0006): pushes are announced
+as facts by a hook, and Claude announces a judgement call when work changes what
+someone else should do right now. A session never announces in a turn a wake
+started, and automatic posts are capped per session per hour. `pause` silences a
+machine in both directions.
+
 ## Commands
 
 ```bash
@@ -134,8 +163,11 @@ hooks/bus-send.sh --type deploy -t TRUXO-123 "shipped the auth refactor"
 hooks/bus-send.sh --to ravi "just you: can you review the bus PR?"
 hooks/bus-send.sh --room truxo-3618-hotfix "patch reverted"
 
-# rooms
+# rooms this MACHINE listens on
 hooks/bus-rooms.sh [join|leave] <room>
+
+# rooms THIS SESSION is woken for
+/bus-join truxo-3663
 
 # read the bodies of what's waiting
 /bus-inbox

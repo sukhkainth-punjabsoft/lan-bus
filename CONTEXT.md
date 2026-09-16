@@ -55,6 +55,12 @@ Optional long-form text attached to an Event: a handoff guide, a spec, a log.
 Stored apart from the Event and kept for a limited time.
 _Avoid_: body, attachment, payload, blob
 
+**Announcement**:
+An Event a Session posts on its own initiative rather than at a person's request
+— a push, or a judgement that the work changes what someone else should do now.
+Never capped when a human asked for it; capped per Session per hour when not.
+_Avoid_: auto-post, notification, broadcast
+
 **Notice**:
 What the Bus pushes to a listening machine when an Event is posted: who sent it,
 to which Room, and whether a Document is attached — never the Message or the
