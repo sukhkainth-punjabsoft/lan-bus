@@ -99,9 +99,24 @@ The interruption of a live Claude Code session to tell it Notices are waiting.
 The point of the whole system.
 _Avoid_: notify, ping, trigger, rewake
 
+**Session**:
+One live Claude Code conversation, identified by the id its hooks are handed.
+The thing a Wake interrupts and a Cursor belongs to. Several run at once on one
+machine, usually on different Rooms — which is why neither is a property of the
+machine.
+_Avoid_: window, tab, conversation, client
+
+**Binding**:
+The set of Rooms a Session is woken for. Always explicit, because Room names are
+arbitrary and nothing about a Workstream room can be read off a checkout.
+Distinct from the Monitor's join: the Monitor joins every Room the machine
+listens to, a Binding decides which of them reach a given Session.
+_Avoid_: subscription, membership, join (that is the Monitor's word)
+
 **Cursor**:
-How far through a Room a machine has already read. Kept per Room, so each is
-caught up independently.
+How far through a Room one Session has already read. Kept per Session and Room,
+so two Sessions on one machine stay caught up independently and neither consumes
+the other's Notices.
 _Avoid_: offset, position, watermark
 
 **Pause**:
