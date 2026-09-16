@@ -11,6 +11,18 @@
         ]
       }
     ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/bus-announce.sh record",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [
@@ -20,6 +32,16 @@
             "async": true,
             "asyncRewake": true,
             "timeout": 1860
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/bus-announce.sh flush",
+            "async": true,
+            "timeout": 30
           }
         ]
       }
