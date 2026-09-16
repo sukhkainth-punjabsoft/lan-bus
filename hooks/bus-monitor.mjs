@@ -83,6 +83,15 @@ const BUS_ORIGIN = cfg.BUS_ORIGIN || (cfg.BUS_URL || "").replace(/\/api\/v\d+\/b
 // The bus is unauthenticated for now, so this name is the whole identity. It is
 // what stops your own messages waking you, which is why it is required.
 const DEV_NAME = cfg.DEV_NAME;
+// Senders to drop on arrival. The bus is unauthenticated, so `dev` is whatever
+// the poster typed — this is noise control, not a security boundary. Set
+// BUS_IGNORE_DEVS=a,b in config.env.
+const IGNORED_DEVS = new Set(
+  (cfg.BUS_IGNORE_DEVS || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean),
+);
 
 if (!BUS_ORIGIN || !DEV_NAME) {
   log("! no BUS_ORIGIN/DEV_NAME configured — see config.example.env. Exiting.");
@@ -204,6 +213,10 @@ const onEvent = (name, data) => {
     // Paused? Drop it rather than spooling — a paused monitor that silently
     // banks notices would dump the whole backlog the moment you resume.
     if (fs.existsSync(PAUSE_FILE)) return;
+    if (IGNORED_DEVS.has(data?.dev)) {
+      log(`ignored event from ${data.dev} (BUS_IGNORE_DEVS)`);
+      return;
+    }
     try {
       fs.appendFileSync(SPOOL, JSON.stringify(data) + "\n");
     } catch (err) {

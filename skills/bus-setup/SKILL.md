@@ -73,13 +73,18 @@ The bus never wakes someone with their own message, so testing as themselves
 proves nothing. Post as a throwaway second identity:
 
 ```bash
+CONFIG_DIR="${TRUXO_BUS_CONFIG_DIR:-$HOME/.config/truxo-bus}"
+ME="$(grep -E '^DEV_NAME=' "$CONFIG_DIR/config.env" | cut -d= -f2 | tr -d ' "')"
 FAKE="$(mktemp -d)"
 sed 's/^DEV_NAME=.*/DEV_NAME=setup-test/; s/^DEV_LABEL=.*/DEV_LABEL="Setup Test"/' \
-  "${TRUXO_BUS_CONFIG_DIR:-$HOME/.config/truxo-bus}/config.env" > "$FAKE/config.env"
+  "$CONFIG_DIR/config.env" > "$FAKE/config.env"
 TRUXO_BUS_CONFIG_DIR="$FAKE" "${CLAUDE_PLUGIN_ROOT}/hooks/bus-send.sh" \
-  "bus-setup test — if this wakes you, it works"
+  --to "$ME" "bus-setup test — if this wakes you, it works"
 rm -rf "$FAKE"
 ```
+
+`--to "$ME"` keeps the test in your own inbox. Without it the test lands in the
+repo room and wakes the whole team — every time anybody sets the bus up.
 
 Then tell them: the message is queued, and their session will surface it when
 the current turn ends. They'll see the sender and a count — not the text, which
